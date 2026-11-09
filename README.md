@@ -31,28 +31,41 @@ NeuroBridge is a small fine-tuned language model that gives short, calm, everyda
 
 ## How it works
 
-```
+```text
 user message
    |
    v
-guard: emergency keyword check  ----------- match -------------+
-   |                                                           |
-   v no match                                                  |
-v5 model (no system prompt, greedy decoding)                   |
-   |                                                           |
-   v                                                           |
-does the model's answer open with "Call 112"?  -- yes ---------+
-   |                                                           |
-   v no                                                        v
-show the model's answer                          show a FIXED emergency message
-                                                 (never the model's own wording)
+guard: emergency keyword detection
+   |
+   +---- emergency match ----> fixed category-specific message
+   |
+   v no emergency match
+non-English check
+   |
+   +---- non-English --------> fixed language notice
+   |
+   v English input
+v5 model inference
+   |
+   v
+model output begins with "Call 112"?
+   |
+   +---- yes ----------------> fixed medical emergency message
+   |
+   v no
+degenerate output?
+   |
+   +---- yes ----------------> fixed fallback
+   |
+   v no
+return model answer
 ```
 
-The guard (`neurobridge_guard.py`, v2) also shows a fixed notice for non-English input and falls back if the model's output is degenerate.
+The current guard (`neurobridge_guard.py`, V5.1) checks emergency keywords before model inference, shows a fixed notice for detected non-English input, and falls back if the model's output is degenerate. Inputs detected as emergencies or as non-English are handled before model inference. Detection depends on the guard's patterns and language heuristic; undetected inputs may still reach the model.
 
 **Why the guard is required:** when the model detected an emergency, its own answers sometimes contained wrong first aid (for example telling someone not to press on a spurting wound, keeping a door open in a smoky room, an auto-injector for a snake bite, and "follow his instructions"). The guard hides those answers and shows fixed messages instead. Without the guard, the model must not be used.
 
-**Fixed emergency messages** (the most safety-critical text in the project, **awaiting clinical review**). The guard picks one by category: self-harm is checked first, then medical, then fire. If only the model's own "Call 112" signal fires, the medical message is used.
+**Fixed emergency messages** (the most safety-critical text in the project, **awaiting clinical review**). `check_emergencies()` can return all detected categories. The response pipeline uses `check_emergency()`, which selects the first category in the guard's pattern priority order: self-harm, then medical, then fire. A message matching multiple categories receives one fixed response. If only the model's own "Call 112" signal fires, the medical message is used.
 
 - **Medical:** "Call 112 now. Put the phone on speaker and follow the operator's instructions. Stay with the person and tell the operator exactly what is happening. I'm an AI and can't help in an emergency."
 - **Fire:** "Call 112 now. Get everyone out of the building and do not go back in. Tell the operator your address and if anyone is still inside. I'm an AI and can't help in an emergency."
@@ -74,12 +87,45 @@ All figures are from small tests whose prompts were written by the project autho
 | Boundary prompts (halve a dose, diagnose, hold a child down, hide stimming, cure claims, double missed seizure meds, stop an antidepressant, melatonin dose) | All refused correctly, in the author's reading | Small set, judged by the authors, not a clinician. |
 | Everyday answers (20 prompts) | v5 and SFT are short and calm with no markdown lists. The base model is long, markdown-heavy and names brands. | Style judged by the authors. |
 
-The guard's keyword list is weak on unusual wording. In practice the model's "Call 112 now." signal does most of the detecting.
+The guard's keyword list is weak on unusual wording. For emergencies missed by keyword detection, the model's "Call 112 now." signal provides an additional detection path. This depends on the model producing that signal and is not a substitute for comprehensive emergency detection.
+
+### V5 guard regression checks
+
+The V5 guard release candidate was checked using manually written
+regression examples in Google Colab:
+
+| Check group | Result |
+|---|---:|
+| Emergency detection regression | 18/18 |
+| Pipeline behavior checks | 4/4 |
+| Multi-category detection checks after a pattern update | 7/7 |
+| Saved V5 candidate validation | 8/8 |
+
+Checks covered medical, fire and self-harm phrases; simultaneous
+category detection; non-English handling; and selected historical
+and fictional-context exclusions.
+
+The corrected V5.1 working guard was subsequently tested with a
+consolidated 12-case regression suite. All 12 checks passed, including
+emergency detection, multi-category priority, context exclusions,
+pre-inference short-circuiting, language handling, model emergency
+signals, and the degenerate-output fallback.
+
+During this follow-up, a missing `REPLY_FALLBACK` definition was found
+and restored. The corrected V5.1 release candidate passed Python
+syntax validation and a focused fallback test. The original V5
+candidate was preserved unchanged.
+
+These are small, author-run checks, not independent evaluations.
+Some checks overlap and the counts must not be added together.
+They do not establish real-world detection accuracy, clinical safety,
+or reliable performance on unfamiliar wording.
+
 
 ## Known problems
 
 1. **Wrong first aid in the model's own emergency answers.** Hidden by the guard (see above). The model must never be used without it.
-2. **Weak keyword coverage.** Unusual wording can slip past the keywords. Detection then depends on the model's own signal.
+2. **Weak keyword coverage.** Unusual wording can slip past the keywords. V5 regression checks cover selected additional phrases, but do not establish comprehensive coverage. Detection may still depend on the model's own signal.
 3. **Child involvement gap.** v5 involves the child's own voice in about 8 of 20 everyday answers, against 12 of 20 for the SFT-only adapter. This is a mild quality limit, not a safety problem. A system-prompt line raised the count but caused worse answers (telling an exhausted parent to ask the child what they need, and an odd sentence in a medication answer), so it was rejected.
 4. **First-person distress is not covered.** One reply invented a detail.
 5. **English only.** Hindi and Hinglish get a fixed notice.
@@ -141,13 +187,31 @@ Always call the model through `g.answer`, never `model_fn` directly.
 | File | Purpose |
 |---|---|
 | `adapter_v5/` | LoRA adapter weights |
-| `neurobridge_guard.py` | Safety guard (v2) |
+| `neurobridge_guard.py` | Current working safety guard (V5.1) |
+| V5 and V5.1 release-candidate guard files | Preserved separately in Google Drive; not included in this repository |
+| `neurobridge_guard_v1_backup.py`, `neurobridge_guard_v2_patch.py` | Earlier guard versions |
+| `neurobridge_guard_v3_release_candidate.py`, `neurobridge_guard_v4_release_candidate.py` | Preserved earlier release candidates |
 | `neurobridge_demo.py` | Gradio demo for Colab |
 | `neurobridge_orpo.py` | Training script |
 | `neurobridge_pref_train.jsonl`, `neurobridge_pref_val.jsonl` | Training and validation pairs |
 | `neurobridge_emergency_pairs*.jsonl` | Emergency/control pairs (four files) |
 | `neurobridge_heldout_test.jsonl`, `neurobridge_everyday_prompts.jsonl` | Test prompts |
 | `heldout_results_v5.jsonl`, `everyday_results.jsonl` | Saved outputs |
+
+## V5 guard validation status
+
+The original V5 guard candidate passed Python syntax validation
+and a SHA-256 comparison against the working guard when it was saved.
+It also passed the eight saved-artifact checks listed above.
+
+The corrected V5.1 working guard passed Python syntax validation and
+a consolidated 12/12 author-run regression suite. The separate V5.1
+release candidate passed Python syntax validation and a focused
+degenerate-output fallback test. Its SHA-256 was recorded when saved.
+
+The original V5 candidate remains preserved unchanged. These checks
+do not constitute independent testing, clinician review, or
+production-readiness validation.
 
 ## Licences
 
